@@ -14,6 +14,7 @@ const commentRouter        = require('./routes/comment');
 const authRouter           = require('./routes/auth');
 const setupWorkflowRouter  = require('./routes/setupWorkflow');
 const reviewsRouter        = require('./routes/reviews');
+const applyFixRouter       = require('./routes/applyFix');
 
 const app = express();
 
@@ -59,6 +60,7 @@ app.use('/comment',         commentRouter);
 app.use('/auth/github',     authRouter);          // all OAuth routes under /auth/github/*
 app.use('/setup-workflow',  setupWorkflowRouter);
 app.use('/reviews',         reviewsRouter);
+app.use('/apply-fix',       applyFixRouter);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
