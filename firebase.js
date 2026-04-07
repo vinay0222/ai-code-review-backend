@@ -40,6 +40,14 @@ function parsePrivateKey(raw) {
   return key;
 }
 
+// ─── Initialise ───────────────────────────────────────────────────────────────
+// NOTE: Errors here are logged but do NOT crash the server.
+// Routes that need Firestore check `db !== null` and return a clean 503.
+// This means the /health endpoint, GitHub OAuth flow, and AI review still
+// respond even when Firebase credentials are misconfigured.
+
+let db = null;
+
 if (!admin.apps.length) {
   const projectId   = process.env.FIREBASE_PROJECT_ID;
   const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
@@ -47,17 +55,18 @@ if (!admin.apps.length) {
 
   if (!projectId || !clientEmail || !privateKey) {
     console.error(
-      '❌  Firebase Admin not initialised — set FIREBASE_PROJECT_ID, ' +
-      'FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY in .env'
+      '⚠️  Firebase Admin NOT initialised — FIREBASE_PROJECT_ID, ' +
+      'FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY must all be set.\n' +
+      '   Server will start but Firestore-dependent routes will return 503.'
     );
   } else {
-    // Sanity-check the key shape before handing to Firebase SDK
+    // Quick sanity-check: a valid PEM key always has these markers
     const keyOk = privateKey.includes('-----BEGIN') && privateKey.includes('-----END');
     if (!keyOk) {
       console.error(
-        '❌  FIREBASE_PRIVATE_KEY does not look like a valid PEM key.\n' +
-        `   First 60 chars: ${privateKey.slice(0, 60)}\n` +
-        '   Make sure you pasted the full key WITHOUT surrounding quotes.'
+        '⚠️  FIREBASE_PRIVATE_KEY does not look like a valid PEM key.\n' +
+        `   First 60 chars: ${JSON.stringify(privateKey.slice(0, 60))}\n` +
+        '   Paste the raw key value WITHOUT surrounding quotes into Render.'
       );
     }
 
@@ -65,20 +74,27 @@ if (!admin.apps.length) {
       admin.initializeApp({
         credential: admin.credential.cert({ projectId, clientEmail, privateKey }),
       });
+      db = admin.firestore();
       console.log(`   Firebase Admin: ✅ initialised (project: ${projectId})`);
     } catch (err) {
-      console.error('❌  Firebase Admin initializeApp failed:', err.message);
+      console.error('⚠️  Firebase Admin initializeApp failed:', err.message);
       console.error(
-        '   Key diagnostic — starts with:',
-        JSON.stringify(privateKey.slice(0, 50)),
-        '| line count:', privateKey.split('\n').length
+        '   Key diagnostic:',
+        `starts="${JSON.stringify(privateKey.slice(0, 40))}"`,
+        `lines=${privateKey.split('\n').length}`,
+        `hasBegin=${privateKey.includes('-----BEGIN')}`,
+        `hasEnd=${privateKey.includes('-----END')}`
       );
-      // Re-throw so the process exits with a clear error rather than silently failing
-      throw err;
+      console.error('   Server will start without Firestore support.');
+      // Do NOT re-throw — let the server start so /health stays green
     }
   }
 }
 
-const db = admin.apps.length ? admin.firestore() : null;
+// If initializeApp succeeded, db was set above; otherwise stays null.
+// (Re-read in case admin.apps.length was already >0 on hot-reload)
+if (!db && admin.apps.length) {
+  try { db = admin.firestore(); } catch (_) { /* already logged */ }
+}
 
 module.exports = { admin, db };
