@@ -11,6 +11,7 @@ const {
 } = require('../github');
 const { optionalAuth, resolveGitHubToken } = require('../middleware/auth');
 const { db } = require('../firebase');
+const { buildSystemPrompt, buildUserPrompt } = require('../prompts');
 
 const router = express.Router();
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -18,92 +19,6 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // ─── Valid trigger types ───────────────────────────────────────────────────────
 
 const VALID_TRIGGERS = new Set(['manual', 'label', 'comment', 'github_action', 'webhook']);
-
-// ─── Prompt builders ───────────────────────────────────────────────────────────
-
-function buildSystemPrompt() {
-  return `You are a STRICT senior software engineer doing a code review. Do NOT assume code is correct. Your job is to find issues.
-
-Analyse the PR diff for ALL of the following:
-1. Logical errors — wrong conditions, off-by-one, incorrect branching
-2. Incorrect return values — functions returning wrong type, null/undefined leaks
-3. Unused variables — declared but never read, dead assignments
-4. Mismatch between function name and implementation — misleading names
-5. Edge cases — empty input, null/undefined, empty arrays, zero, negative numbers, concurrent calls
-6. Code quality issues — duplication, overly complex logic, missing error handling, magic numbers
-
-RULES:
-- NEVER say "looks good" or "no issues" if ANY issue exists — no matter how minor
-- Be critical and precise; explain WHY each item is an issue, not just what it is
-- Every issue must have a concrete fix suggestion
-- Severity guide:
-    high   = breaks functionality, security hole, data loss risk
-    medium = incorrect behaviour in common cases, bad practice with real impact
-    low    = code smell, misleading name, missing edge-case guard, style
-
-Respond ONLY with a valid JSON object — no markdown fences, no prose outside the JSON:
-
-{
-  "summary": "<2–4 sentences: what the PR does, overall quality assessment, and key concerns>",
-  "verdict": "approve" | "needs_changes",
-  "confidence_score": <integer 0-100>,
-  "issues": [
-    {
-      "category": "logical_error" | "return_value" | "unused_variable" | "naming_mismatch" | "edge_case" | "code_quality" | "security" | "performance",
-      "file": "<filename as it appears in the diff header, or 'general'>",
-      "line": <integer line number in the NEW file, or null>,
-      "severity": "high" | "medium" | "low",
-      "issue": "<precise description of the problem and WHY it is wrong>",
-      "suggestion": "<concrete, actionable fix>"
-    }
-  ]
-}
-
-verdict rules:
-- "needs_changes" if there is ANY high or medium severity issue
-- "approve"       only when all issues are low severity or the issues array is empty`;
-}
-
-function buildUserPrompt(diff, rules, docs, config, prDetails) {
-  const checks = [];
-  if (config?.check_edge_cases)     checks.push('edge cases and boundary conditions');
-  if (config?.check_code_structure) checks.push('code structure and organisation');
-  if (config?.check_performance)    checks.push('performance bottlenecks');
-  if (config?.check_security)       checks.push('security vulnerabilities');
-  if (config?.check_best_practices) checks.push('best practices and code quality');
-  if (config?.check_unit_tests)     checks.push('unit test coverage gaps');
-
-  const parts = [];
-
-  if (prDetails) {
-    parts.push(`PR: "${prDetails.title}" by @${prDetails.user?.login}`);
-    if (prDetails.body?.trim()) {
-      parts.push(`PR Description: ${prDetails.body.trim().substring(0, 500)}`);
-    }
-  }
-
-  parts.push(
-    `Strictness level: ${config?.strictness || 'medium'} (low = critical only, medium = balanced, high = exhaustive)`
-  );
-
-  if (checks.length) parts.push(`Focus areas: ${checks.join(', ')}`);
-
-  if (rules?.length) {
-    parts.push(`\nProject-specific rules:\n${rules.map((r, i) => `  ${i + 1}. ${r}`).join('\n')}`);
-  }
-
-  if (docs?.trim()) {
-    parts.push(`\nProject documentation / context:\n${docs.trim()}`);
-  }
-
-  const trimmedDiff =
-    diff.length > 14000
-      ? diff.substring(0, 14000) + '\n\n[...diff truncated for length...]'
-      : diff;
-
-  parts.push(`\nPR diff:\n\`\`\`diff\n${trimmedDiff}\n\`\`\``);
-  return parts.join('\n');
-}
 
 // ─── Route: POST /review ───────────────────────────────────────────────────────
 //
@@ -123,7 +38,7 @@ function buildUserPrompt(diff, rules, docs, config, prDetails) {
 //   3. No token → 401
 
 router.post('/', optionalAuth, async (req, res) => {
-  const {
+  let {
     pr_url,
     project_id,
     triggered_by = 'manual',
@@ -132,6 +47,31 @@ router.post('/', optionalAuth, async (req, res) => {
     docs   = '',
     config = {},
   } = req.body;
+
+  // ── 0. Hydrate project config for auto-triggered reviews ─────────────────────
+  //
+  // When GitHub Actions calls /review there is no auth token, so rules/docs/config
+  // are not sent in the body.  If a project_id is provided, fetch the stored project
+  // from Firestore and merge its settings so the review honours the saved config
+  // (including strict_mode, strictness, check_* toggles, rules, and docs).
+  if (project_id && db) {
+    try {
+      const projectDoc = await db.collection('projects').doc(project_id).get();
+      if (projectDoc.exists) {
+        const proj = projectDoc.data();
+        // Only backfill fields that were not explicitly sent in the request body
+        if (!req.body.rules  || req.body.rules.length  === 0) rules  = proj.rules  || [];
+        if (!req.body.docs   || req.body.docs.trim()   === '') docs   = proj.docs   || '';
+        if (!req.body.config || Object.keys(req.body.config).length === 0) {
+          config = proj.review_config || {};
+        }
+        logger.info('review.project_config_loaded', { project_id, strict_mode: !!config.strict_mode, strictness: config.strictness });
+      }
+    } catch (err) {
+      // Non-fatal — fall back to defaults
+      logger.warn('review.project_config_load_failed', { project_id, error: err.message });
+    }
+  }
 
   const trigger       = VALID_TRIGGERS.has(triggered_by) ? triggered_by : 'manual';
   const shouldAutoPost = auto_post ?? (trigger !== 'manual');
@@ -229,12 +169,18 @@ router.post('/', optionalAuth, async (req, res) => {
   // ── 6. Run AI review ─────────────────────────────────────────────────────────
   let aiResult;
   try {
-    logger.info('review.ai_start', { requestId, model: 'gpt-4o', diff_bytes: diff.length });
+    logger.info('review.ai_start', {
+      requestId,
+      model:       'gpt-4o',
+      diff_bytes:  diff.length,
+      prompt_mode: config.strict_mode ? 'strict' : 'standard',
+      strictness:  config.strictness || 'medium',
+    });
 
     const completion = await openai.chat.completions.create({
       model:           'gpt-4o',
       messages: [
-        { role: 'system', content: buildSystemPrompt() },
+        { role: 'system', content: buildSystemPrompt(config) },
         { role: 'user',   content: buildUserPrompt(diff, rules, docs, config, prDetails) },
       ],
       response_format: { type: 'json_object' },
@@ -394,6 +340,8 @@ router.post('/', optionalAuth, async (req, res) => {
         issues_medium:    issuesMedium,
         issues_low:       issuesLow,
         confidence_score: aiResult.confidence_score,
+        prompt_mode:      config.strict_mode ? 'strict' : 'standard',
+        strictness:       config.strictness || 'medium',
         status:           'completed',
         triggered_by:     trigger,
         auto_posted:      !!autoPostResult,
