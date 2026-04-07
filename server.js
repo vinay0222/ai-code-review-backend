@@ -51,10 +51,10 @@ app.use((req, _res, next) => {
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-app.use('/projects', projectsRouter);
-app.use('/review',   reviewRouter);
-app.use('/comment',  commentRouter);
-app.use('/auth',     authRouter);
+app.use('/projects',    projectsRouter);
+app.use('/review',      reviewRouter);
+app.use('/comment',     commentRouter);
+app.use('/auth/github', authRouter);   // all OAuth routes live under /auth/github/*
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {

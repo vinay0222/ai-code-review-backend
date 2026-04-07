@@ -282,4 +282,77 @@ router.delete('/', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * GET /auth/github/repos
+ *
+ * Returns all GitHub repos accessible to the logged-in user:
+ * - Their own personal repos
+ * - Repos from every organisation they belong to
+ *
+ * Results are sorted by last-push date (most recently active first).
+ * The actual token is never returned — only repo metadata.
+ */
+router.get('/repos', requireAuth, async (req, res) => {
+  const { resolveGitHubToken } = require('../middleware/auth');
+  const { token } = await resolveGitHubToken(req.userId);
+
+  if (!token) {
+    return res.status(401).json({
+      error: 'GitHub account not connected. Connect GitHub first to browse repositories.',
+    });
+  }
+
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept:        'application/vnd.github.v3+json',
+    'User-Agent':  'AI-Code-Review-Tool/1.0',
+  };
+
+  try {
+    // Fetch up to 100 repos the authenticated user can access
+    // type=all covers: owned, member (collaborator), and org repos
+    const { data } = await axios.get('https://api.github.com/user/repos', {
+      headers,
+      params: {
+        type:      'all',
+        sort:      'pushed',
+        direction: 'desc',
+        per_page:  100,
+      },
+      timeout: 15000,
+    });
+
+    const repos = data.map((r) => ({
+      id:             r.id,
+      name:           r.name,
+      full_name:      r.full_name,
+      html_url:       r.html_url,
+      description:    r.description || null,
+      private:        r.private,
+      owner:          r.owner.login,
+      owner_type:     r.owner.type,   // 'User' | 'Organization'
+      default_branch: r.default_branch,
+      pushed_at:      r.pushed_at,
+      language:       r.language || null,
+    }));
+
+    logger.info('auth.github.repos_fetched', {
+      userId:   req.userId,
+      count:    repos.length,
+      personal: repos.filter((r) => r.owner_type === 'User').length,
+      org:      repos.filter((r) => r.owner_type === 'Organization').length,
+    });
+
+    res.json({ repos });
+  } catch (err) {
+    const status = err.response?.status;
+    const hint =
+      status === 401 ? ' — GitHub token expired, please reconnect'
+      : status === 403 ? ' — token lacks repo access'
+      : '';
+    logger.error('auth.github.repos_failed', { userId: req.userId, status, error: err.message });
+    res.status(502).json({ error: `Failed to fetch GitHub repositories${hint}` });
+  }
+});
+
 module.exports = router;
