@@ -102,6 +102,12 @@ router.post('/', requireAuth, async (req, res) => {
   const workflowContent = generateWorkflow(backendUrl);
   const contentBase64   = Buffer.from(workflowContent).toString('base64');
 
+  // Always return the YAML so the frontend can show a copy/download fallback
+  const workflowMeta = {
+    file_path:     '.github/workflows/ai-review.yml',
+    workflow_yaml: workflowContent,
+  };
+
   const filePath = '.github/workflows/ai-review.yml';
   const apiUrl   = `https://api.github.com/repos/${owner}/${repoName}/contents/${filePath}`;
 
@@ -113,9 +119,19 @@ router.post('/', requireAuth, async (req, res) => {
     logger.info('setup_workflow.file_exists', { owner, repo: repoName, sha: existingSha });
   } catch (err) {
     if (err.response?.status !== 404) {
-      logger.error('setup_workflow.check_failed', { owner, repo: repoName, error: err.message });
-      return res.status(502).json({
-        error: `GitHub API error: ${err.response?.data?.message || err.message}`,
+      const status = err.response?.status;
+      const hint =
+        status === 401 ? 'GitHub token is invalid or expired. Reconnect your GitHub account.'
+        : status === 403 ? 'Your token lacks read access to this repository.'
+        : status === 404 ? 'Repository not found. Check the repo URL in the Overview tab.'
+        : err.response?.data?.message || err.message;
+
+      logger.error('setup_workflow.check_failed', { owner, repo: repoName, status, error: err.message });
+      return res.json({
+        success:     false,
+        push_failed: true,
+        reason:      hint,
+        ...workflowMeta,
       });
     }
     // 404 = file doesn't exist yet — that's fine
@@ -143,6 +159,13 @@ router.post('/', requireAuth, async (req, res) => {
       action:  existingSha ? 'updated' : 'created',
     });
 
+    logger.info('setup_workflow.success', {
+      userId: req.userId,
+      owner,
+      repo:    repoName,
+      action:  existingSha ? 'updated' : 'created',
+    });
+
     res.json({
       success:    true,
       action:     existingSha ? 'updated' : 'created',
@@ -151,21 +174,27 @@ router.post('/', requireAuth, async (req, res) => {
       message:    existingSha
         ? 'Workflow file updated in your repository.'
         : 'Workflow file created. AI reviews will now run automatically on new PRs.',
+      ...workflowMeta,
     });
   } catch (err) {
     const status = err.response?.status;
     const hint =
-      status === 401 ? ' — GitHub token is invalid or expired'
-      : status === 403 ? ' — token lacks write access to this repo'
-      : status === 404 ? ' — repository not found'
-      : '';
+      status === 401 ? 'GitHub token is invalid or expired. Reconnect your GitHub account.'
+      : status === 403 ? 'Your token lacks write access to this repository. Make sure the connected GitHub account has push access.'
+      : status === 404 ? 'Repository not found. Check the repo URL in the Overview tab and make sure your GitHub account has access to it.'
+      : err.response?.data?.message || err.message;
 
     logger.error('setup_workflow.put_failed', {
       owner, repo: repoName, status, error: err.message,
     });
 
-    res.status(502).json({
-      error: `Failed to push workflow file${hint}: ${err.response?.data?.message || err.message}`,
+    // Return 200 with push_failed=true + the YAML so the frontend can
+    // show a manual-copy fallback rather than just an error banner
+    res.json({
+      success:     false,
+      push_failed: true,
+      reason:      hint,
+      ...workflowMeta,
     });
   }
 });
