@@ -64,11 +64,21 @@ jobs:
 router.post('/', requireAuth, async (req, res) => {
   const { repo } = req.body;
 
-  if (!repo || !repo.includes('/')) {
+  if (!repo) {
+    return res.status(400).json({ error: 'repo is required' });
+  }
+
+  // Strip any URL prefix and .git suffix the frontend may have left in
+  const slug = repo
+    .replace(/^(https?:\/\/)?(www\.)?github\.com\//, '')
+    .replace(/\.git$/, '')
+    .replace(/\/$/, '');
+
+  if (!slug.includes('/')) {
     return res.status(400).json({ error: 'repo must be "owner/repo" format' });
   }
 
-  const [owner, repoName] = repo.split('/');
+  const [owner, repoName] = slug.split('/');
 
   // ── Resolve GitHub token ──────────────────────────────────────────────────
   const { token } = await resolveGitHubToken(req.userId);
