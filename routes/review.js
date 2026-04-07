@@ -10,6 +10,7 @@ const {
   postReviewToGitHub,
 } = require('../github');
 const { optionalAuth, resolveGitHubToken } = require('../middleware/auth');
+const { db } = require('../firebase');
 
 const router = express.Router();
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -107,6 +108,7 @@ function buildUserPrompt(diff, rules, docs, config, prDetails) {
 router.post('/', optionalAuth, async (req, res) => {
   const {
     pr_url,
+    project_id,
     triggered_by = 'manual',
     auto_post,
     rules  = [],
@@ -311,16 +313,48 @@ router.post('/', optionalAuth, async (req, res) => {
     ...(autoPostError && { auto_post_error: autoPostError }),
   };
 
+  const issuesHigh   = aiResult.issues.filter(i => i.severity === 'high').length;
+  const issuesMedium = aiResult.issues.filter(i => i.severity === 'medium').length;
+  const issuesLow    = aiResult.issues.filter(i => i.severity === 'low').length;
+
   logger.info('review.complete', {
     requestId,
     trigger,
     tokenSource,
     owner, repo, pull_number,
-    issues_high:   aiResult.issues.filter(i => i.severity === 'high').length,
-    issues_medium: aiResult.issues.filter(i => i.severity === 'medium').length,
-    issues_low:    aiResult.issues.filter(i => i.severity === 'low').length,
+    issues_high:   issuesHigh,
+    issues_medium: issuesMedium,
+    issues_low:    issuesLow,
     auto_posted:   !!autoPostResult,
   });
+
+  // ── 10. Persist review record ─────────────────────────────────────────────
+  if (db && (project_id || req.userId)) {
+    try {
+      await db.collection('reviews').add({
+        projectId:        project_id || null,
+        userId:           req.userId || null,
+        pr_url:           prDetails.html_url || pr_url,
+        pr_title:         prDetails.title || null,
+        summary:          aiResult.summary,
+        issues:           aiResult.issues,
+        issues_count:     aiResult.issues.length,
+        issues_high:      issuesHigh,
+        issues_medium:    issuesMedium,
+        issues_low:       issuesLow,
+        confidence_score: aiResult.confidence_score,
+        status:           'completed',
+        triggered_by:     trigger,
+        auto_posted:      !!autoPostResult,
+        request_id:       requestId,
+        createdAt:        require('firebase-admin').firestore.FieldValue.serverTimestamp(),
+      });
+      logger.info('review.saved', { requestId, project_id: project_id || null });
+    } catch (err) {
+      // Non-fatal — review result is already computed, just log the failure
+      logger.warn('review.save_failed', { requestId, error: err.message });
+    }
+  }
 
   res.json(response);
 });

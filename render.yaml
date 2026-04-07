@@ -49,3 +49,6 @@ services:
 
       - key: FIREBASE_PRIVATE_KEY
         sync: false
+
+      - key: BACKEND_URL
+        sync: false

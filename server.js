@@ -8,10 +8,12 @@ const cors    = require('cors');
 const logger  = require('./logger');
 const { globalLimiter } = require('./middleware/rateLimiter');
 
-const projectsRouter = require('./routes/projects');
-const reviewRouter   = require('./routes/review');
-const commentRouter  = require('./routes/comment');
-const authRouter     = require('./routes/auth');
+const projectsRouter       = require('./routes/projects');
+const reviewRouter         = require('./routes/review');
+const commentRouter        = require('./routes/comment');
+const authRouter           = require('./routes/auth');
+const setupWorkflowRouter  = require('./routes/setupWorkflow');
+const reviewsRouter        = require('./routes/reviews');
 
 const app = express();
 
@@ -51,10 +53,12 @@ app.use((req, _res, next) => {
 });
 
 // ── Routes ────────────────────────────────────────────────────────────────────
-app.use('/projects',    projectsRouter);
-app.use('/review',      reviewRouter);
-app.use('/comment',     commentRouter);
-app.use('/auth/github', authRouter);   // all OAuth routes live under /auth/github/*
+app.use('/projects',        projectsRouter);
+app.use('/review',          reviewRouter);
+app.use('/comment',         commentRouter);
+app.use('/auth/github',     authRouter);          // all OAuth routes under /auth/github/*
+app.use('/setup-workflow',  setupWorkflowRouter);
+app.use('/reviews',         reviewsRouter);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
@@ -82,6 +86,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚀 AI Code Review server running on port ${PORT}`);
   console.log(`   Environment:    ${process.env.NODE_ENV || 'development'}`);
   console.log(`   Allowed origins: ${ALLOWED_ORIGINS.join(', ')}`);
+  console.log(`   Backend URL:    ${process.env.BACKEND_URL || '(not set — will use request host)'}`);
   console.log(`   OpenAI key:     ${process.env.OPENAI_API_KEY       ? '✅ set' : '❌ missing'}`);
   console.log(`   GitHub OAuth:   ${process.env.GITHUB_CLIENT_ID     ? '✅ configured' : '⚠️  not set'}`);
   console.log(`   GitHub token:   ${process.env.GITHUB_TOKEN         ? '✅ set (server fallback)' : '⚠️  not set'}`);
