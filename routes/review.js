@@ -329,11 +329,29 @@ router.post('/', optionalAuth, async (req, res) => {
   });
 
   // ── 10. Persist review record ─────────────────────────────────────────────
-  if (db && (project_id || req.userId)) {
+  //
+  // When triggered by GitHub Actions there is no authenticated user, so
+  // req.userId is null.  If a project_id was provided, look up the project
+  // to get the owner's userId — without it the history query (which filters
+  // by userId) would never return this record.
+  let saveUserId = req.userId || null;
+  if (!saveUserId && project_id && db) {
+    try {
+      const projectDoc = await db.collection('projects').doc(project_id).get();
+      if (projectDoc.exists) {
+        saveUserId = projectDoc.data().userId || null;
+        logger.info('review.resolved_owner', { requestId, project_id, saveUserId });
+      }
+    } catch (err) {
+      logger.warn('review.owner_lookup_failed', { requestId, project_id, error: err.message });
+    }
+  }
+
+  if (db && (project_id || saveUserId)) {
     try {
       await db.collection('reviews').add({
         projectId:        project_id || null,
-        userId:           req.userId || null,
+        userId:           saveUserId,
         pr_url:           prDetails.html_url || pr_url,
         pr_title:         prDetails.title || null,
         summary:          aiResult.summary,
