@@ -1,0 +1,121 @@
+name: AI Code Review
+
+# Triggers: new PRs, new commits pushed to PRs, label events, PR comments
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  issue_comment:
+    types: [created]
+
+jobs:
+  ai-review:
+    name: Run AI Code Review
+    runs-on: ubuntu-latest
+
+    # Only run on PRs (not regular issue comments)
+    if: |
+      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '/ai-review'))
+
+    steps:
+      - name: Determine trigger type
+        id: trigger
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            if [ "${{ github.event.action }}" = "labeled" ]; then
+              echo "type=label" >> $GITHUB_OUTPUT
+            else
+              echo "type=github_action" >> $GITHUB_OUTPUT
+            fi
+          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "type=comment" >> $GITHUB_OUTPUT
+          else
+            echo "type=github_action" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get PR URL
+        id: pr
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "url=${{ github.event.pull_request.html_url }}" >> $GITHUB_OUTPUT
+          else
+            # issue_comment: resolve PR URL from the issue
+            echo "url=https://github.com/${{ github.repository }}/pull/${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Call AI Review API
+        env:
+          SERVER_URL: ${{ secrets.AI_REVIEW_SERVER_URL }}
+          PR_URL:     ${{ steps.pr.outputs.url }}
+          TRIGGER:    ${{ steps.trigger.outputs.type }}
+        run: |
+          echo "🤖 Sending PR for AI review..."
+          echo "   PR:       $PR_URL"
+          echo "   Trigger:  $TRIGGER"
+
+          RESPONSE=$(curl \
+            --silent \
+            --fail-with-body \
+            --max-time 180 \
+            --retry 2 \
+            --retry-delay 5 \
+            -X POST "$SERVER_URL/review" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"pr_url\":      \"$PR_URL\",
+              \"triggered_by\": \"$TRIGGER\"
+            }")
+
+          EXIT_CODE=$?
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Review API call failed (exit $EXIT_CODE)"
+            echo "$RESPONSE"
+            exit 1
+          fi
+
+          # Pretty-print the response
+          echo "$RESPONSE" | python3 -m json.tool 2>/dev/null || echo "$RESPONSE"
+
+          # Check if it was a duplicate
+          SKIPPED=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          print('true' if d.get('skipped_duplicate') else 'false')
+          " 2>/dev/null || echo "false")
+
+          if [ "$SKIPPED" = "true" ]; then
+            echo "⏭️  Skipped — review already posted in the last 5 minutes."
+          else
+            ISSUES=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          issues = d.get('issues', [])
+          high   = sum(1 for i in issues if i.get('severity') == 'high')
+          medium = sum(1 for i in issues if i.get('severity') == 'medium')
+          low    = sum(1 for i in issues if i.get('severity') == 'low')
+          print(f'Total: {len(issues)}  🔴 High: {high}  🟡 Medium: {medium}  🟢 Low: {low}')
+          " 2>/dev/null || echo "")
+            echo "✅ Review complete. $ISSUES"
+          fi
+
+      # ── Optional: fail CI if high-severity issues are found ─────────────────
+      # Uncomment to make the check fail when high-severity issues exist:
+      #
+      # - name: Fail on high severity issues
+      #   env:
+      #     SERVER_URL: ${{ secrets.AI_REVIEW_SERVER_URL }}
+      #     PR_URL:     ${{ steps.pr.outputs.url }}
+      #   run: |
+      #     RESPONSE=$(curl --silent -X POST "$SERVER_URL/review" \
+      #       -H "Content-Type: application/json" \
+      #       -d "{\"pr_url\":\"$PR_URL\",\"triggered_by\":\"github_action\"}")
+      #     HIGH=$(echo "$RESPONSE" | python3 -c "
+      #     import sys,json; d=json.load(sys.stdin)
+      #     print(sum(1 for i in d.get('issues',[]) if i.get('severity')=='high'))")
+      #     if [ "$HIGH" -gt "0" ]; then
+      #       echo "❌ $HIGH high-severity issue(s) found. Please fix before merging."
+      #       exit 1
+      #     fi

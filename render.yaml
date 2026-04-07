@@ -1,0 +1,52 @@
+# Render Blueprint — deploys the backend as a Web Service.
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: ai-code-review-backend
+    env: node
+    region: oregon
+    plan: free
+
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+
+    healthCheckPath: /health
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      - key: LOG_LEVEL
+        value: info
+
+      - key: OPENAI_API_KEY
+        sync: false
+
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+      - key: GITHUB_CLIENT_ID
+        sync: false
+
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+
+      - key: GITHUB_CALLBACK_URL
+        sync: false
+
+      - key: FRONTEND_URL
+        sync: false
+
+      - key: GITHUB_TOKEN
+        sync: false
+
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
