@@ -22,29 +22,46 @@ const VALID_TRIGGERS = new Set(['manual', 'label', 'comment', 'github_action', '
 // ─── Prompt builders ───────────────────────────────────────────────────────────
 
 function buildSystemPrompt() {
-  return `You are an expert senior software engineer performing a thorough code review.
-Analyse the PR diff provided and respond ONLY with a valid JSON object matching this exact schema:
+  return `You are a STRICT senior software engineer doing a code review. Do NOT assume code is correct. Your job is to find issues.
+
+Analyse the PR diff for ALL of the following:
+1. Logical errors — wrong conditions, off-by-one, incorrect branching
+2. Incorrect return values — functions returning wrong type, null/undefined leaks
+3. Unused variables — declared but never read, dead assignments
+4. Mismatch between function name and implementation — misleading names
+5. Edge cases — empty input, null/undefined, empty arrays, zero, negative numbers, concurrent calls
+6. Code quality issues — duplication, overly complex logic, missing error handling, magic numbers
+
+RULES:
+- NEVER say "looks good" or "no issues" if ANY issue exists — no matter how minor
+- Be critical and precise; explain WHY each item is an issue, not just what it is
+- Every issue must have a concrete fix suggestion
+- Severity guide:
+    high   = breaks functionality, security hole, data loss risk
+    medium = incorrect behaviour in common cases, bad practice with real impact
+    low    = code smell, misleading name, missing edge-case guard, style
+
+Respond ONLY with a valid JSON object — no markdown fences, no prose outside the JSON:
 
 {
-  "summary": "<1–3 sentence overview of what the PR does and overall quality>",
-  "confidence_score": <integer 0-100 representing your confidence in this review>,
+  "summary": "<2–4 sentences: what the PR does, overall quality assessment, and key concerns>",
+  "verdict": "approve" | "needs_changes",
+  "confidence_score": <integer 0-100>,
   "issues": [
     {
-      "file": "<filename relative to repo root, or 'general'>",
-      "line": <integer line number in the new file, or null>,
+      "category": "logical_error" | "return_value" | "unused_variable" | "naming_mismatch" | "edge_case" | "code_quality" | "security" | "performance",
+      "file": "<filename as it appears in the diff header, or 'general'>",
+      "line": <integer line number in the NEW file, or null>,
       "severity": "high" | "medium" | "low",
-      "issue": "<clear description of the problem>",
-      "suggestion": "<actionable fix or recommendation>"
+      "issue": "<precise description of the problem and WHY it is wrong>",
+      "suggestion": "<concrete, actionable fix>"
     }
   ]
 }
 
-Rules:
-- Return ONLY JSON — no markdown fences, no prose outside the JSON
-- If the PR looks clean, return an empty issues array and a positive summary
-- Be specific and actionable in every suggestion
-- Use the exact file path as it appears in the diff header (e.g. "src/utils/auth.js")
-- Line numbers must refer to lines in the NEW version of the file (right side of diff)`;
+verdict rules:
+- "needs_changes" if there is ANY high or medium severity issue
+- "approve"       only when all issues are low severity or the issues array is empty`;
 }
 
 function buildUserPrompt(diff, rules, docs, config, prDetails) {
@@ -249,6 +266,20 @@ router.post('/', optionalAuth, async (req, res) => {
   aiResult.summary          = aiResult.summary          || 'Review complete.';
   aiResult.confidence_score = aiResult.confidence_score ?? 80;
 
+  // Derive verdict if the model omitted it
+  if (!aiResult.verdict) {
+    const hasHighOrMedium = aiResult.issues.some(
+      (i) => i.severity === 'high' || i.severity === 'medium'
+    );
+    aiResult.verdict = hasHighOrMedium ? 'needs_changes' : 'approve';
+  }
+
+  // Ensure each issue has a category (backwards-compat)
+  aiResult.issues = aiResult.issues.map((i) => ({
+    category: 'code_quality',
+    ...i,
+  }));
+
   const commitSha = prDetails.head?.sha;
 
   // ── 8. Auto-post to GitHub ───────────────────────────────────────────────────
@@ -286,6 +317,7 @@ router.post('/', optionalAuth, async (req, res) => {
   // ── 9. Build and return response ─────────────────────────────────────────────
   const response = {
     summary:          aiResult.summary,
+    verdict:          aiResult.verdict,
     confidence_score: aiResult.confidence_score,
     issues:           aiResult.issues,
 
@@ -355,6 +387,7 @@ router.post('/', optionalAuth, async (req, res) => {
         pr_url:           prDetails.html_url || pr_url,
         pr_title:         prDetails.title || null,
         summary:          aiResult.summary,
+        verdict:          aiResult.verdict,
         issues:           aiResult.issues,
         issues_count:     aiResult.issues.length,
         issues_high:      issuesHigh,

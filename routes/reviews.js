@@ -49,6 +49,7 @@ router.get('/:projectId', requireAuth, async (req, res) => {
           issues_medium: d.issues_medium ?? 0,
           issues_low:    d.issues_low    ?? 0,
           confidence_score: d.confidence_score ?? null,
+          verdict:       d.verdict       || null,
           status:        d.status        || 'completed',
           triggered_by:  d.triggered_by  || 'manual',
           userId:        d.userId        || null,
