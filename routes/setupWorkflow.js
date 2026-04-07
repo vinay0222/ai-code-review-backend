@@ -91,11 +91,22 @@ function ghHeaders(token) {
 
 // ─── GET /setup-workflow/status ───────────────────────────────────────────────
 //
-// Query:  repo=owner/repo
-// Returns { exists: bool, file_url: string|null }
+// Query:  repo=owner/repo  [required]
+//         project_id=xxx   [optional — used to compare content]
+//
+// Returns {
+//   exists:     bool,
+//   is_current: bool | null,   // null when file doesn't exist or compare failed
+//   file_url:   string | null,
+// }
+//
+// is_current === true  → existing file matches the workflow we'd generate now
+// is_current === false → file exists but is outdated (different backend URL or project_id)
 
 router.get('/status', requireAuth, async (req, res) => {
-  const slug = normaliseSlug(req.query.repo);
+  const slug       = normaliseSlug(req.query.repo);
+  const project_id = req.query.project_id || null;
+
   if (!slug || !slug.includes('/')) {
     return res.status(400).json({ error: 'repo query param required (owner/repo)' });
   }
@@ -110,14 +121,41 @@ router.get('/status', requireAuth, async (req, res) => {
 
   try {
     const { data } = await axios.get(apiUrl, { headers: ghHeaders(token), timeout: 8000 });
-    return res.json({ exists: true, file_url: data.html_url || null });
+
+    // Decode existing file content
+    let isCurrent = null;
+    try {
+      const existingContent = Buffer.from(
+        data.content.replace(/\n/g, ''),
+        'base64'
+      ).toString('utf-8');
+
+      const backendUrl = process.env.BACKEND_URL || `https://${req.headers.host}`;
+      const expectedContent = generateWorkflow(backendUrl, project_id);
+
+      // Normalise line endings before comparing
+      isCurrent = existingContent.replace(/\r\n/g, '\n').trim() ===
+                  expectedContent.replace(/\r\n/g, '\n').trim();
+    } catch (compareErr) {
+      logger.warn('setup_workflow.compare_error', { slug, error: compareErr.message });
+    }
+
+    return res.json({
+      exists:     true,
+      is_current: isCurrent,
+      file_url:   data.html_url || null,
+    });
   } catch (err) {
     if (err.response?.status === 404) {
-      return res.json({ exists: false, file_url: null });
+      return res.json({ exists: false, is_current: null, file_url: null });
     }
-    // 401/403 → token issue but file might exist; treat as unknown
     logger.warn('setup_workflow.status_error', { slug, status: err.response?.status });
-    return res.json({ exists: false, file_url: null, error: err.response?.data?.message });
+    return res.json({
+      exists:     false,
+      is_current: null,
+      file_url:   null,
+      error:      err.response?.data?.message,
+    });
   }
 });
 
