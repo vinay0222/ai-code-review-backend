@@ -75,6 +75,18 @@ function buildDetails(status, err, slug) {
   return [];
 }
 
+function workflowScopeHintIfLikely(status, accessOk, slug) {
+  if (!(status === 404 && accessOk === true)) return null;
+  return {
+    reason: 'Workflow update was rejected. Repository is reachable, so your token is likely missing workflow scope.',
+    details: [
+      `Repository access to ${slug} is confirmed, but writing .github/workflows was denied.`,
+      'Disconnect and reconnect GitHub so the app can request the workflow scope.',
+      'Then try Enable Build Automation again.',
+    ],
+  };
+}
+
 async function verifyRepoWriteAccess({ headers, owner, repoName }) {
   const slug = `${owner}/${repoName}`;
   try {
@@ -324,11 +336,12 @@ router.post('/setup-build-workflow', requireAuth, async (req, res) => {
   } catch (err) {
     if (err.response?.status !== 404) {
       logger.error('build_automation.read_failed', { slug, status: err.response?.status });
+      const wfScope = workflowScopeHintIfLikely(err.response?.status, access.ok, slug);
       return res.json({
         success: false,
         push_failed: true,
-        reason: buildHint(err.response?.status, err),
-        details: buildDetails(err.response?.status, err, slug),
+        reason: wfScope?.reason || buildHint(err.response?.status, err),
+        details: wfScope?.details || buildDetails(err.response?.status, err, slug),
         file_path: filePath,
         workflow_yaml: yaml,
         build_automation: firestorePayload,
@@ -432,11 +445,12 @@ router.post('/setup-build-workflow', requireAuth, async (req, res) => {
       }
 
       // 200 + success:false so the client can show YAML copy UI like setup-workflow
+      const wfScope = workflowScopeHintIfLikely(err.response?.status, access.ok, slug);
       return res.json({
         success:       false,
         push_failed:   true,
-        reason:        buildHint(err.response?.status, err),
-        details:       buildDetails(err.response?.status, err, slug),
+        reason:        wfScope?.reason || buildHint(err.response?.status, err),
+        details:       wfScope?.details || buildDetails(err.response?.status, err, slug),
         file_path:     filePath,
         workflow_yaml: yaml,
         build_automation: firestorePayload,

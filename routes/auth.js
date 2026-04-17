@@ -172,7 +172,7 @@ router.get('/url', requireAuth, async (req, res) => {
     const params = new URLSearchParams({
       client_id:    GH_CLIENT_ID(),
       redirect_uri: CALLBACK_URL(),
-      scope:        'repo read:user user:email',
+      scope:        'repo workflow read:user user:email',
       state,
     });
 
@@ -205,7 +205,7 @@ router.get('/', requireAuth, async (req, res) => {
     const params = new URLSearchParams({
       client_id:    GH_CLIENT_ID(),
       redirect_uri: CALLBACK_URL(),
-      scope:        'repo read:user user:email',
+      scope:        'repo workflow read:user user:email',
       state,
     });
 
