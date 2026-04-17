@@ -84,22 +84,29 @@ async function verifyRepoWriteAccess({ headers, owner, repoName }) {
     );
 
     const perms = data.permissions || {};
+    // permissions can be absent depending on token type / org policy;
+    // only hard-fail when GitHub explicitly reports no write/admin/maintain.
+    const hasPermissionsObject = Object.keys(perms).length > 0;
     const hasWrite = !!(perms.push || perms.admin || perms.maintain);
-    if (!hasWrite) {
+    if (hasPermissionsObject && !hasWrite) {
       return {
         ok: false,
         reason: 'Connected GitHub account has read access but not write access to this repository.',
         details: buildDetails(403, { response: { data: { message: 'Missing repository write access' } } }, slug),
+        defaultBranch: data.default_branch || 'main',
       };
     }
 
     return { ok: true, defaultBranch: data.default_branch || 'main' };
   } catch (err) {
+    // Best effort check only. Don't block setup flow on precheck failures;
+    // direct push / fallback PR attempt gives a more reliable answer.
     const status = err.response?.status;
     return {
-      ok: false,
+      ok: null,
       reason: buildHint(status, err),
       details: buildDetails(status, err, slug),
+      defaultBranch: 'main',
     };
   }
 }
@@ -295,7 +302,7 @@ router.post('/setup-build-workflow', requireAuth, async (req, res) => {
   };
 
   const access = await verifyRepoWriteAccess({ headers, owner, repoName });
-  if (!access.ok) {
+  if (access.ok === false) {
     return res.json({
       success: false,
       push_failed: true,
