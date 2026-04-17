@@ -86,3 +86,10 @@ The non-JSON guard was added to prevent the confusing `"Unexpected token '<'"` e
 | Function | Method | Endpoint | Notes |
 |---|---|---|---|
 | `applyFix(body)` | POST | `/apply-fix` | Body: `{ pr_url, project_id }` |
+
+### Build automation (Flutter CI)
+| Function | Method | Endpoint | Notes |
+|---|---|---|---|
+| `getBuildBranches(repo)` | GET | `/auth/github/branches?repo=` | Branch names for Build UI |
+| `setupBuildWorkflow(body)` | POST | `/setup-build-workflow` | Push `flutter-build.yml` + store `build_automation` |
+| `getBuildStatus(repo, projectId?)` | GET | `/auth/github/build-status?repo=&project_id=` | Latest run + artifacts |

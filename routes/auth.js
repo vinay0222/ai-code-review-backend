@@ -11,7 +11,7 @@
  *      → we exchange the code for a GitHub access_token
  *      → we fetch the user's GitHub username
  *      → we store { githubToken, githubUsername } in Firestore users/{userId}
- *      → we redirect the browser to FRONTEND_URL with ?github=connected
+ *      → we redirect the browser to the app (see post-OAuth redirect below)
  *
  *   3. GET /auth/github/status  — returns connection status for the logged-in user
  *   4. DELETE /auth/github      — removes the stored token (disconnect)
@@ -24,6 +24,7 @@ const { v4: uuidv4 } = require('uuid');
 const { admin, db }    = require('../firebase');
 const { requireAuth }  = require('../middleware/auth');
 const logger           = require('../logger');
+const { buildFlutterBuildStatusResponse } = require('../lib/githubFlutterBuildStatus');
 
 const router = express.Router();
 
@@ -35,13 +36,39 @@ const FRONTEND_URL     = () => process.env.FRONTEND_URL || 'http://localhost:517
 const CALLBACK_URL     = () => process.env.GITHUB_CALLBACK_URL || 'http://localhost:3001/auth/github/callback';
 const STATE_TTL_MS     = 10 * 60 * 1000; // 10 minutes
 
+// Same parsing as server.js — used to tie OAuth return redirect to an allowed browser origin.
+function parseAllowedOrigins() {
+  return (process.env.ALLOWED_ORIGINS || 'http://localhost:5173')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+}
+
+/**
+ * When the user starts OAuth from fetch(), the browser sends `Origin`.
+ * If that origin is in ALLOWED_ORIGINS, we remember it so the callback can
+ * redirect back to local dev (http://localhost:5173) even when FRONTEND_URL
+ * on Render points at production.
+ */
+function postOAuthRedirectFromRequest(req) {
+  const origin = req.get('Origin');
+  if (!origin) return null;
+  return parseAllowedOrigins().includes(origin) ? origin : null;
+}
+
+function resolvePostOAuthBase(postOAuthRedirect) {
+  const raw = (postOAuthRedirect && String(postOAuthRedirect).trim()) || FRONTEND_URL();
+  return raw.replace(/\/$/, '');
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
 /** Save a state nonce in Firestore and return it. */
-async function createStateNonce(userId) {
+async function createStateNonce(userId, postOAuthRedirect) {
   const nonce = uuidv4();
   await db.collection('oauth_states').doc(nonce).set({
     userId,
+    postOAuthRedirect: postOAuthRedirect || null,
     createdAt:  admin.firestore.FieldValue.serverTimestamp(),
     expiresAt:  new Date(Date.now() + STATE_TTL_MS),
   });
@@ -50,7 +77,7 @@ async function createStateNonce(userId) {
 
 /**
  * Consume a state nonce — verifies it exists, isn't expired, then deletes it.
- * Returns userId on success, throws on failure.
+ * Returns { userId, postOAuthRedirect } on success, throws on failure.
  */
 async function consumeStateNonce(nonce) {
   if (!nonce) throw new Error('Missing state parameter');
@@ -60,14 +87,14 @@ async function consumeStateNonce(nonce) {
 
   if (!doc.exists) throw new Error('Invalid or already-used state parameter');
 
-  const { userId, expiresAt } = doc.data();
+  const { userId, expiresAt, postOAuthRedirect } = doc.data();
   const expired = expiresAt.toDate ? expiresAt.toDate() < new Date() : expiresAt < new Date();
 
   // Always delete — one-time use
   await ref.delete();
 
   if (expired) throw new Error('OAuth state expired — please try again');
-  return userId;
+  return { userId, postOAuthRedirect: postOAuthRedirect || null };
 }
 
 /** Exchange GitHub OAuth code for an access token. */
@@ -138,7 +165,8 @@ router.get('/url', requireAuth, async (req, res) => {
   }
 
   try {
-    const state = await createStateNonce(req.userId);
+    const postOAuthRedirect = postOAuthRedirectFromRequest(req);
+    const state = await createStateNonce(req.userId, postOAuthRedirect);
     logger.info('auth.github.url_issued', { userId: req.userId });
 
     const params = new URLSearchParams({
@@ -170,7 +198,8 @@ router.get('/', requireAuth, async (req, res) => {
   }
 
   try {
-    const state = await createStateNonce(req.userId);
+    const postOAuthRedirect = postOAuthRedirectFromRequest(req);
+    const state = await createStateNonce(req.userId, postOAuthRedirect);
     logger.info('auth.github.redirect', { userId: req.userId });
 
     const params = new URLSearchParams({
@@ -196,23 +225,40 @@ router.get('/', requireAuth, async (req, res) => {
 router.get('/callback', async (req, res) => {
   const { code, state, error: ghError, error_description } = req.query;
 
-  // User denied access
+  /** Best-effort: recover where to send the user using the OAuth state doc. */
+  async function redirectBaseFromState() {
+    if (!state) return resolvePostOAuthBase(null);
+    try {
+      const { postOAuthRedirect } = await consumeStateNonce(state);
+      return resolvePostOAuthBase(postOAuthRedirect);
+    } catch {
+      return resolvePostOAuthBase(null);
+    }
+  }
+
+  // User denied access (GitHub usually still returns `state`)
   if (ghError) {
     logger.warn('auth.github.denied', { error: ghError });
-    return res.redirect(`${FRONTEND_URL()}?github=denied&reason=${encodeURIComponent(ghError)}`);
+    const base = await redirectBaseFromState();
+    return res.redirect(`${base}?github=denied&reason=${encodeURIComponent(ghError)}`);
   }
 
   if (!code || !state) {
-    return res.redirect(`${FRONTEND_URL()}?github=error&reason=missing_code_or_state`);
+    const base = state ? await redirectBaseFromState() : resolvePostOAuthBase(null);
+    return res.redirect(`${base}?github=error&reason=missing_code_or_state`);
   }
 
   let userId;
+  let postOAuthRedirect;
   try {
-    userId = await consumeStateNonce(state);
+    ({ userId, postOAuthRedirect } = await consumeStateNonce(state));
   } catch (err) {
     logger.warn('auth.github.invalid_state', { error: err.message });
-    return res.redirect(`${FRONTEND_URL()}?github=error&reason=${encodeURIComponent(err.message)}`);
+    const base = resolvePostOAuthBase(null);
+    return res.redirect(`${base}?github=error&reason=${encodeURIComponent(err.message)}`);
   }
+
+  const base = resolvePostOAuthBase(postOAuthRedirect);
 
   let token, ghUser;
   try {
@@ -220,7 +266,7 @@ router.get('/callback', async (req, res) => {
     ghUser = await fetchGitHubUser(token);
   } catch (err) {
     logger.error('auth.github.exchange_failed', { userId, error: err.message });
-    return res.redirect(`${FRONTEND_URL()}?github=error&reason=token_exchange_failed`);
+    return res.redirect(`${base}?github=error&reason=token_exchange_failed`);
   }
 
   try {
@@ -228,11 +274,11 @@ router.get('/callback', async (req, res) => {
     logger.info('auth.github.connected', { userId, githubUsername: ghUser.login });
   } catch (err) {
     logger.error('auth.github.save_failed', { userId, error: err.message });
-    return res.redirect(`${FRONTEND_URL()}?github=error&reason=save_failed`);
+    return res.redirect(`${base}?github=error&reason=save_failed`);
   }
 
   // Success — redirect back to the dashboard
-  res.redirect(`${FRONTEND_URL()}?github=connected&username=${encodeURIComponent(ghUser.login)}`);
+  res.redirect(`${base}?github=connected&username=${encodeURIComponent(ghUser.login)}`);
 });
 
 /**
@@ -353,6 +399,71 @@ router.get('/repos', requireAuth, async (req, res) => {
     logger.error('auth.github.repos_failed', { userId: req.userId, status, error: err.message });
     res.status(502).json({ error: `Failed to fetch GitHub repositories${hint}` });
   }
+});
+
+/**
+ * GET /auth/github/branches
+ *
+ * Query: repo=owner/repo (or full github.com URL)
+ * Returns { branches: string[] } for Build Automation and similar UIs.
+ */
+router.get('/branches', requireAuth, async (req, res) => {
+  const raw = req.query.repo;
+  const slug = raw
+    ? String(raw)
+        .replace(/^(https?:\/\/)?(www\.)?github\.com\//, '')
+        .replace(/\.git$/, '')
+        .replace(/\/$/, '')
+    : '';
+  if (!slug || !slug.includes('/')) {
+    return res.status(400).json({ error: 'repo query param required (owner/repo)' });
+  }
+
+  const { resolveGitHubToken } = require('../middleware/auth');
+  const { token } = await resolveGitHubToken(req.userId);
+  if (!token) {
+    return res.status(401).json({ error: 'GitHub account not connected' });
+  }
+
+  const [owner, repoName] = slug.split('/');
+  const headers = {
+    Authorization:        `Bearer ${token}`,
+    Accept:               'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent':         'AI-Code-Review-Tool/1.0',
+  };
+
+  try {
+    const { data } = await axios.get(
+      `https://api.github.com/repos/${owner}/${repoName}/branches`,
+      { headers, params: { per_page: 100 }, timeout: 15000 }
+    );
+    const branches = (data || []).map((b) => b.name).filter(Boolean);
+    logger.info('auth.github.branches_fetched', { userId: req.userId, owner, repo: repoName, count: branches.length });
+    res.json({ branches });
+  } catch (err) {
+    const status = err.response?.status;
+    const msg =
+      status === 404 ? 'Repository not found or not accessible.'
+        : err.response?.data?.message || err.message || 'Failed to list branches';
+    logger.warn('auth.github.branches_failed', { userId: req.userId, status, error: err.message });
+    res.status(status && status < 500 ? status : 502).json({ error: msg });
+  }
+});
+
+/**
+ * GET /auth/github/build-status
+ *
+ * Flutter CI: latest Actions run + artifacts (same payload as legacy GET /build-status).
+ * Mounted under /auth/github so it works when buildAutomation routes are not deployed.
+ */
+router.get('/build-status', requireAuth, async (req, res) => {
+  const { status, body } = await buildFlutterBuildStatusResponse({
+    repo:       req.query.repo,
+    project_id: req.query.project_id || null,
+    userId:     req.userId,
+  });
+  return res.status(status).json(body);
 });
 
 module.exports = router;

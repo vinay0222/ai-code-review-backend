@@ -29,6 +29,7 @@ function docToProject(doc) {
     rules:         data.rules         || [],
     docs:          data.docs          || '',
     review_config: data.review_config || { ...DEFAULT_CONFIG },
+    build_automation: data.build_automation || null,
     created_at:    data.created_at?.toDate?.()?.toISOString() ?? data.created_at,
   };
 }
@@ -119,7 +120,7 @@ router.put('/:id', async (req, res) => {
     if (doc.data().userId !== req.userId) return res.status(403).json({ error: 'Access denied' });
 
     // Only allow updating safe fields
-    const { name, repo_url, rules, docs, review_config } = req.body;
+    const { name, repo_url, rules, docs, review_config, build_automation } = req.body;
     const patch = {};
 
     if (name          !== undefined) patch.name          = name.trim();
@@ -129,6 +130,9 @@ router.put('/:id', async (req, res) => {
     if (review_config !== undefined) {
       // Deep merge review_config with existing
       patch.review_config = { ...doc.data().review_config, ...review_config };
+    }
+    if (build_automation !== undefined) {
+      patch.build_automation = build_automation;
     }
 
     await ref.update(patch);

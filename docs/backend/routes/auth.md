@@ -107,6 +107,31 @@ GET https://api.github.com/user/repos?per_page=100&type=all&sort=updated
 
 ---
 
+## GET /auth/github/branches
+
+Lists branch names for a single repository (used by Build Automation).
+
+**Auth:** `requireAuth`
+
+**Query:** `repo=owner/repo` (or a full `https://github.com/owner/repo` URL)
+
+**Response:**
+```json
+{ "branches": ["main", "develop", "release"] }
+```
+
+Uses the user’s GitHub token: `GET https://api.github.com/repos/{owner}/{repo}/branches?per_page=100`.
+
+---
+
+## GET /auth/github/build-status
+
+Returns the latest GitHub Actions run and artifacts for the Flutter build workflow. See `lib/githubFlutterBuildStatus.js`.
+
+**Query:** `repo=owner/repo`, optional `project_id`.
+
+---
+
 ## Environment Variables
 
 | Variable | Purpose |

@@ -40,6 +40,8 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173')
 
 ## Routes Mounted
 
+`buildAutomationRouter` is imported from `./routes/buildAutomation` (see [routes/build-automation.md](routes/build-automation.md)).
+
 ```js
 app.use('/projects',       projectsRouter);
 app.use('/review',         reviewRouter);
@@ -48,6 +50,7 @@ app.use('/auth/github',    authRouter);       // all OAuth routes under /auth/gi
 app.use('/setup-workflow', setupWorkflowRouter);
 app.use('/reviews',        reviewsRouter);
 app.use('/apply-fix',      applyFixRouter);
+app.use(buildAutomationRouter);   // POST /setup-build-workflow only; GET build status → /auth/github/build-status
 ```
 
 ---

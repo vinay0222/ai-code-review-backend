@@ -45,6 +45,15 @@ projects/
       check_best_practices: boolean
       check_unit_tests:     boolean
     }
+    build_automation: {      ← optional; set when user enables Flutter CI from dashboard
+      enabled:       boolean
+      branches:      string[]
+      android:       { apk_name_format: string }
+      windows:       { enabled: boolean, exe_name_format: string }
+      workflow_path: string
+      workflow_name: string
+      updated_at:    string   ← ISO8601
+    }
     created_at:    timestamp
 ```
 

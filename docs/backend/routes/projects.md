@@ -23,6 +23,15 @@ All routes require `requireAuth`.
     "check_best_practices": true,
     "check_unit_tests":     false
   },
+  "build_automation": {
+    "enabled": true,
+    "branches": ["main"],
+    "android": { "apk_name_format": "app-{run}-{branch}" },
+    "windows": { "enabled": false, "exe_name_format": "app-{run}-{branch}" },
+    "workflow_path": ".github/workflows/flutter-build.yml",
+    "workflow_name": "Flutter Build",
+    "updated_at": "ISO8601 string"
+  },
   "created_at": "Firestore server timestamp"
 }
 ```
@@ -54,7 +63,7 @@ Sets `userId`, `rules: []`, `docs: ''`, `review_config: {}`, `created_at`.
 
 ## PUT /projects/:id
 
-Update a project. Allowed fields: `name`, `repo_url`, `rules`, `docs`, `review_config`.
+Update a project. Allowed fields: `name`, `repo_url`, `rules`, `docs`, `review_config`, `build_automation`.
 
 Verifies the document belongs to `req.userId` before updating.
 
