@@ -38,10 +38,164 @@ function ghHeaders(token) {
 }
 
 function buildHint(status, err) {
+  const msg = err?.response?.data?.message || err?.message || '';
+  if (status === 403 && /workflow/i.test(msg) && /scope/i.test(msg)) {
+    return 'Connected GitHub token is missing workflow scope. Reconnect GitHub and grant workflow access.';
+  }
   if (status === 401) return 'GitHub token is invalid or expired. Reconnect your GitHub account.';
   if (status === 403) return 'Your token lacks write access to this repository.';
   if (status === 404) return 'Repository not found or not accessible.';
-  return err?.response?.data?.message || err?.message || 'Unknown error.';
+  return msg || 'Unknown error.';
+}
+
+function buildDetails(status, err, slug) {
+  const msg = err?.response?.data?.message || err?.message || '';
+  if (status === 403 && /workflow/i.test(msg) && /scope/i.test(msg)) {
+    return [
+      'GitHub rejected workflow file updates because the token is missing workflow scope.',
+      'Disconnect and reconnect GitHub from the app, then allow requested permissions.',
+      `Try again for ${slug}.`,
+    ];
+  }
+  if (status === 404) {
+    return [
+      `The connected GitHub account cannot access ${slug}, or the repository path is wrong.`,
+      'Open Overview tab and confirm the repo URL.',
+      'Ensure the connected GitHub user has access to this repository.',
+    ];
+  }
+  if (status === 403) {
+    return [
+      `The connected GitHub account can see ${slug} but cannot push workflow files.`,
+      'Grant write/admin permission to that account in the repository.',
+      'If this is an organization repo, ensure org access is approved for the OAuth app.',
+    ];
+  }
+  if (msg) return [msg];
+  return [];
+}
+
+async function verifyRepoWriteAccess({ headers, owner, repoName }) {
+  const slug = `${owner}/${repoName}`;
+  try {
+    const { data } = await axios.get(
+      `https://api.github.com/repos/${owner}/${repoName}`,
+      { headers, timeout: 12000 }
+    );
+
+    const perms = data.permissions || {};
+    const hasWrite = !!(perms.push || perms.admin || perms.maintain);
+    if (!hasWrite) {
+      return {
+        ok: false,
+        reason: 'Connected GitHub account has read access but not write access to this repository.',
+        details: buildDetails(403, { response: { data: { message: 'Missing repository write access' } } }, slug),
+      };
+    }
+
+    return { ok: true, defaultBranch: data.default_branch || 'main' };
+  } catch (err) {
+    const status = err.response?.status;
+    return {
+      ok: false,
+      reason: buildHint(status, err),
+      details: buildDetails(status, err, slug),
+    };
+  }
+}
+
+async function createWorkflowPrFallback({
+  owner,
+  repoName,
+  headers,
+  filePath,
+  yaml,
+  existingSha,
+  defaultBranch,
+  autoMerge,
+}) {
+  const branchName = `ai-build-workflow-${Date.now()}`;
+
+  // Create branch from default branch head
+  const baseRef = await axios.get(
+    `https://api.github.com/repos/${owner}/${repoName}/git/ref/heads/${encodeURIComponent(defaultBranch)}`,
+    { headers, timeout: 12000 }
+  );
+  const baseSha = baseRef.data.object.sha;
+
+  await axios.post(
+    `https://api.github.com/repos/${owner}/${repoName}/git/refs`,
+    { ref: `refs/heads/${branchName}`, sha: baseSha },
+    { headers, timeout: 12000 }
+  );
+
+  // Write workflow on fallback branch
+  const fileApi = `https://api.github.com/repos/${owner}/${repoName}/contents/${encodeURIComponent(filePath)}`;
+  const putBody = {
+    message: existingSha
+      ? 'chore(ci): update Flutter build workflow'
+      : 'chore(ci): add Flutter build workflow',
+    content: Buffer.from(yaml, 'utf8').toString('base64'),
+    branch: branchName,
+    ...(existingSha && { sha: existingSha }),
+  };
+  await axios.put(fileApi, putBody, { headers, timeout: 20000 });
+
+  const prBody = [
+    '## Build automation fallback PR',
+    '',
+    'Direct push to the default branch failed, so this PR was created automatically.',
+    '',
+    `- Workflow file: \`${filePath}\``,
+    `- Base branch: \`${defaultBranch}\``,
+    '',
+    'Review and merge to enable Flutter build automation.',
+  ].join('\n');
+
+  const prRes = await axios.post(
+    `https://api.github.com/repos/${owner}/${repoName}/pulls`,
+    {
+      title: 'chore(ci): add Flutter build workflow',
+      head: branchName,
+      base: defaultBranch,
+      body: prBody,
+    },
+    { headers, timeout: 15000 }
+  );
+
+  let mergeResult = null;
+  if (autoMerge) {
+    try {
+      const mergeRes = await axios.put(
+        `https://api.github.com/repos/${owner}/${repoName}/pulls/${prRes.data.number}/merge`,
+        {
+          merge_method: 'squash',
+          commit_title: 'chore(ci): add Flutter build workflow',
+        },
+        { headers, timeout: 15000 }
+      );
+      mergeResult = {
+        merged: true,
+        sha: mergeRes.data.sha || null,
+        message: mergeRes.data.message || 'PR merged successfully.',
+      };
+    } catch (mergeErr) {
+      mergeResult = {
+        merged: false,
+        message: mergeErr?.response?.data?.message || mergeErr.message || 'Auto-merge failed.',
+      };
+    }
+  }
+
+  return {
+    pr: {
+      number: prRes.data.number,
+      url: prRes.data.html_url,
+      branch: branchName,
+      base: defaultBranch,
+    },
+    merge: mergeResult,
+  };
 }
 
 /** Verify project belongs to user and return ref */
@@ -82,6 +236,8 @@ router.post('/setup-build-workflow', requireAuth, async (req, res) => {
     branches,
     android: androidIn,
     windows: windowsIn,
+    fallback_on_push_failure = false,
+    auto_merge_fallback_pr = false,
   } = req.body || {};
 
   if (!repo) {
@@ -124,6 +280,34 @@ router.post('/setup-build-workflow', requireAuth, async (req, res) => {
   const headers = ghHeaders(token);
   const apiUrl = `https://api.github.com/repos/${owner}/${repoName}/contents/${encodeURIComponent(filePath)}`;
 
+  const firestorePayload = {
+    enabled:              enabled !== false,
+    branches:             Array.isArray(branches) && branches.length ? branches : ['main'],
+    android,
+    windows,
+    fallback: {
+      on_push_failure: !!fallback_on_push_failure,
+      auto_merge_pr: !!(fallback_on_push_failure && auto_merge_fallback_pr),
+    },
+    workflow_path:        filePath,
+    workflow_name:        WORKFLOW_NAME,
+    updated_at:           new Date().toISOString(),
+  };
+
+  const access = await verifyRepoWriteAccess({ headers, owner, repoName });
+  if (!access.ok) {
+    return res.json({
+      success: false,
+      push_failed: true,
+      reason: access.reason,
+      details: access.details,
+      file_path: filePath,
+      workflow_yaml: yaml,
+      build_automation: firestorePayload,
+    });
+  }
+  const defaultBranch = access.defaultBranch || 'main';
+
   const contentBase64 = Buffer.from(yaml, 'utf8').toString('base64');
 
   let existingSha;
@@ -137,21 +321,13 @@ router.post('/setup-build-workflow', requireAuth, async (req, res) => {
         success: false,
         push_failed: true,
         reason: buildHint(err.response?.status, err),
+        details: buildDetails(err.response?.status, err, slug),
         file_path: filePath,
         workflow_yaml: yaml,
+        build_automation: firestorePayload,
       });
     }
   }
-
-  const firestorePayload = {
-    enabled:              enabled !== false,
-    branches:             Array.isArray(branches) && branches.length ? branches : ['main'],
-    android,
-    windows,
-    workflow_path:        filePath,
-    workflow_name:        WORKFLOW_NAME,
-    updated_at:           new Date().toISOString(),
-  };
 
   try {
     const putBody = {
@@ -186,19 +362,83 @@ router.post('/setup-build-workflow', requireAuth, async (req, res) => {
         : 'Flutter build workflow created. Add repository secrets (see docs) before running.',
       build_automation: firestorePayload,
       workflow_yaml:    yaml,
+      fallback: {
+        enabled: !!fallback_on_push_failure,
+        used: false,
+      },
     });
-    } catch (err) {
-      logger.error('build_automation.put_failed', { slug, status: err.response?.status });
+  } catch (err) {
+      logger.error('build_automation.put_failed', {
+        slug,
+        status: err.response?.status,
+        fallback_on_push_failure: !!fallback_on_push_failure,
+      });
+
+      // Optional fallback: create PR (and optionally merge) if direct push fails.
+      if (fallback_on_push_failure) {
+        try {
+          const fallback = await createWorkflowPrFallback({
+            owner,
+            repoName,
+            headers,
+            filePath,
+            yaml,
+            existingSha,
+            defaultBranch,
+            autoMerge: !!auto_merge_fallback_pr,
+          });
+
+          if (projectRef) {
+            await projectRef.update({ build_automation: firestorePayload });
+          }
+
+          const merged = !!fallback.merge?.merged;
+          return res.json({
+            success: true,
+            action: merged ? 'fallback_pr_merged' : 'fallback_pr_created',
+            message: merged
+              ? 'Direct push failed, but fallback PR was created and auto-merged.'
+              : 'Direct push failed, but a fallback PR was created successfully.',
+            reason: buildHint(err.response?.status, err),
+            details: buildDetails(err.response?.status, err, slug),
+            file_path: filePath,
+            build_automation: firestorePayload,
+            workflow_yaml: yaml,
+            fallback: {
+              enabled: true,
+              used: true,
+              pr_url: fallback.pr.url,
+              pr_number: fallback.pr.number,
+              branch: fallback.pr.branch,
+              base: fallback.pr.base,
+              auto_merge_requested: !!auto_merge_fallback_pr,
+              auto_merge: fallback.merge,
+            },
+          });
+        } catch (fallbackErr) {
+          logger.error('build_automation.fallback_failed', {
+            slug,
+            status: fallbackErr.response?.status,
+            error: fallbackErr.message,
+          });
+        }
+      }
+
       // 200 + success:false so the client can show YAML copy UI like setup-workflow
       return res.json({
         success:       false,
         push_failed:   true,
         reason:        buildHint(err.response?.status, err),
+        details:       buildDetails(err.response?.status, err, slug),
         file_path:     filePath,
         workflow_yaml: yaml,
         build_automation: firestorePayload,
+        fallback: {
+          enabled: !!fallback_on_push_failure,
+          used: false,
+        },
       });
-    }
+  }
 });
 
 // GET /build-status moved to GET /auth/github/build-status (see routes/auth.js + lib/githubFlutterBuildStatus.js)

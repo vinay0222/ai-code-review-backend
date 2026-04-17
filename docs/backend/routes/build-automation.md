@@ -24,13 +24,16 @@ Creates or updates the workflow file in the target repository via the [GitHub Co
   "windows": {
     "enabled": false,
     "exe_name_format": "app-{run}-{branch}"
-  }
+  },
+  "fallback_on_push_failure": true,
+  "auto_merge_fallback_pr": false
 }
 ```
 
 - **`enabled`:** If `false`, the workflow only runs on `workflow_dispatch` (no push triggers).
 - **`branches`:** Used in `on.push.branches` when `enabled` is true.
 - **Name formats:** Tokens `{run}`, `{run_number}`, `{branch}`, `{sha}`, `{short_sha}` are expanded into the generated bash (see `backend/lib/flutterBuildWorkflow.js`).
+- **Fallback options:** when `fallback_on_push_failure` is true, direct push errors can auto-open a PR; with `auto_merge_fallback_pr`, backend also attempts to merge that PR.
 
 **Success (HTTP 200):**
 
@@ -43,13 +46,38 @@ Creates or updates the workflow file in the target repository via the [GitHub Co
   "file_path": ".github/workflows/flutter-build.yml",
   "message": "...",
   "build_automation": { ... },
-  "workflow_yaml": "..."
+  "workflow_yaml": "...",
+  "fallback": {
+    "enabled": true,
+    "used": false
+  }
 }
 ```
 
 If `project_id` is provided and the project belongs to the user, `build_automation` is written to `projects/{projectId}`.
 
-**Push failure (HTTP 200, same pattern as `setup-workflow`):** `success: false`, `push_failed: true`, `reason`, `workflow_yaml` for manual copy.
+**Push failure (HTTP 200, same pattern as `setup-workflow`):** `success: false`, `push_failed: true`, `reason`, optional `details: string[]`, and `workflow_yaml` for manual copy.
+
+If fallback PR succeeds, response stays `success: true` with:
+
+```json
+{
+  "action": "fallback_pr_created" | "fallback_pr_merged",
+  "fallback": {
+    "enabled": true,
+    "used": true,
+    "pr_url": "https://github.com/owner/repo/pull/123",
+    "pr_number": 123,
+    "branch": "ai-build-workflow-...",
+    "base": "main",
+    "auto_merge_requested": true,
+    "auto_merge": {
+      "merged": true | false,
+      "message": "..."
+    }
+  }
+}
+```
 
 ---
 

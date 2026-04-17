@@ -91,5 +91,5 @@ The non-JSON guard was added to prevent the confusing `"Unexpected token '<'"` e
 | Function | Method | Endpoint | Notes |
 |---|---|---|---|
 | `getBuildBranches(repo)` | GET | `/auth/github/branches?repo=` | Branch names for Build UI |
-| `setupBuildWorkflow(body)` | POST | `/setup-build-workflow` | Push `flutter-build.yml` + store `build_automation` |
+| `setupBuildWorkflow(body)` | POST | `/setup-build-workflow` | Push `flutter-build.yml` + store `build_automation` (supports `fallback_on_push_failure` and `auto_merge_fallback_pr`) |
 | `getBuildStatus(repo, projectId?)` | GET | `/auth/github/build-status?repo=&project_id=` | Latest run + artifacts |
